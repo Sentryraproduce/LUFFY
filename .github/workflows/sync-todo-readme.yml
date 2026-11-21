@@ -1,0 +1,163 @@
+name: Sync TODO README
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Update Complete TODO List
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          MAIN_SHA = "266cbc22215201a93c02e37200fe32be98a9e931"
+          README = Path("README.md")
+          HEADING = "### \U0001f4dd Complete TODO List"
+
+          text = README.read_text(encoding="utf-8")
+          if HEADING not in text:
+              raise SystemExit("Required heading not found")
+
+          entry_re = re.compile(
+              r"^- \[ \] \*\*(?P<path>.+?):(?P<line>\d+)\*\* - (?P<message>.*)$"
+          )
+          baseline = []
+          for line in text.splitlines():
+              match = entry_re.match(line)
+              if match:
+                  baseline.append((
+                      match.group("path"),
+                      int(match.group("line")),
+                      match.group("message"),
+                  ))
+
+          print(f"Baseline TODO entries: {len(baseline)}")
+
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", MAIN_SHA, "HEAD", "--", "*.py"],
+              text=True,
+          ).splitlines()
+          changed = sorted({p.strip() for p in changed if p.strip()})
+          print("Changed Python files:", changed)
+
+          def git_show(rev, path):
+              return subprocess.check_output(
+                  ["git", "show", f"{rev}:{path}"], text=True, encoding="utf-8"
+              )
+
+          def extract(path, source):
+              items = []
+              for line_no, line in enumerate(source.splitlines(), start=1):
+                  if "TODO" not in line:
+                      continue
+                  rest = line.split("TODO", 1)[1]
+                  # The established README extractor removes the TODO token and
+                  # the separator colon/spaces, but preserves author prefixes
+                  # such as "(sgm):".
+                  message = re.sub(r"^[\s:]+", "", rest).strip()
+                  items.append((path, line_no, message))
+              return items
+
+          # Validate the extractor against the existing README entries for
+          # every Python file changed by main..dev. This protects unchanged
+          # entries and messages from extractor drift.
+          for path in changed:
+              old_items = extract(path, git_show(MAIN_SHA, path))
+              old_readme_items = [item for item in baseline if item[0] == path]
+              if old_items != old_readme_items:
+                  print(f"Extractor mismatch for {path}")
+                  print("--- git/main extraction")
+                  for item in old_items:
+                      print(item)
+                  print("--- README baseline")
+                  for item in old_readme_items:
+                      print(item)
+                  raise SystemExit(2)
+
+          changed_set = set(changed)
+          retained = [item for item in baseline if item[0] not in changed_set]
+          refreshed = []
+          for path in changed:
+              try:
+                  source = git_show("HEAD", path)
+              except subprocess.CalledProcessError:
+                  # Deleted Python file: its README entries are removed by the
+                  # path filter above and there is nothing new to add.
+                  continue
+              refreshed.extend(extract(path, source))
+
+          entries = retained + refreshed
+          entries.sort(key=lambda item: (item[0], item[1]))
+
+          duplicate_keys = [
+              key for key in {(p, n) for p, n, _ in entries}
+              if sum(1 for p, n, _ in entries if (p, n) == key) > 1
+          ]
+          if duplicate_keys:
+              raise SystemExit(f"Duplicate path/line entries: {duplicate_keys}")
+
+          lines = text.splitlines(keepends=True)
+          heading_indices = [
+              i for i, line in enumerate(lines)
+              if line.strip() == HEADING
+          ]
+          if len(heading_indices) != 1:
+              raise SystemExit(f"Expected one heading, found {len(heading_indices)}")
+          h = heading_indices[0]
+
+          end = len(lines)
+          for j in range(h + 1, len(lines)):
+              if re.match(r"^#{2,3}\s", lines[j]):
+                  end = j
+                  break
+
+          heading_line = lines[h]
+          rendered = [
+              f"- [ ] **{path}:{line_no}** - {message}\n"
+              for path, line_no, message in entries
+          ]
+          replacement = [heading_line, "\n"] + rendered + ["\n"]
+          new_lines = lines[:h] + replacement + lines[end:]
+          new_text = "".join(new_lines)
+
+          if new_text != text:
+              README.write_text(new_text, encoding="utf-8")
+              print(f"Updated TODO entries: {len(entries)}")
+              for path in changed:
+                  path_entries = [item for item in entries if item[0] == path]
+                  print(f"{path}: {len(path_entries)} entries")
+                  for item in path_entries:
+                      print(f"  {item[1]}: {item[2]}")
+          else:
+              print("README already up to date")
+          PY
+
+      - name: Show README diff
+        run: git diff -- README.md
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "No README change"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update complete TODO list for dev changes"
+          git push origin HEAD:dev
