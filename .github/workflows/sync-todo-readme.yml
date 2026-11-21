@@ -2,6 +2,8 @@ name: Sync TODO README
 
 on:
   workflow_dispatch:
+  push:
+    branches: [dev]
 
 permissions:
   contents: write
@@ -22,7 +24,6 @@ jobs:
           python3 - <<'PY'
           import re
           import subprocess
-          import sys
           from pathlib import Path
 
           MAIN_SHA = "266cbc22215201a93c02e37200fe32be98a9e931"
@@ -66,16 +67,10 @@ jobs:
                   if "TODO" not in line:
                       continue
                   rest = line.split("TODO", 1)[1]
-                  # The established README extractor removes the TODO token and
-                  # the separator colon/spaces, but preserves author prefixes
-                  # such as "(sgm):".
                   message = re.sub(r"^[\s:]+", "", rest).strip()
                   items.append((path, line_no, message))
               return items
 
-          # Validate the extractor against the existing README entries for
-          # every Python file changed by main..dev. This protects unchanged
-          # entries and messages from extractor drift.
           for path in changed:
               old_items = extract(path, git_show(MAIN_SHA, path))
               old_readme_items = [item for item in baseline if item[0] == path]
@@ -96,8 +91,6 @@ jobs:
               try:
                   source = git_show("HEAD", path)
               except subprocess.CalledProcessError:
-                  # Deleted Python file: its README entries are removed by the
-                  # path filter above and there is nothing new to add.
                   continue
               refreshed.extend(extract(path, source))
 
